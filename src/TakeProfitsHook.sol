@@ -196,7 +196,9 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
                     // We flip the sign of the amount to make it positive when sending it to the pool manager
                     uint128(-delta.amount0())
                 );
-                poolManager.settle(key.currency0);
+
+                poolManager.sync(key.currency0);
+                poolManager.settle();
             }
 
             // If we are owed Token 1, we need to `take` it from the Pool Manager
@@ -217,7 +219,9 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
                     address(poolManager),
                     uint128(-delta.amount1())
                 );
-                poolManager.settle(key.currency1);
+
+                poolManager.sync(key.currency1);
+                poolManager.settle();
             }
 
             // If we are owed Token 0, we take it from the Pool Manager
