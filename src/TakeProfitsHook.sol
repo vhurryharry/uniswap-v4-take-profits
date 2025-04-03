@@ -11,6 +11,9 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
+
+using FixedPointMathLib for uint256;
 
 contract TakeProfitsHook is BaseHook, ERC1155 {
     // Use the PoolIdLibrary for PoolKey to add the `.toId()` function on a PoolKey
@@ -235,5 +238,183 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         }
 
         return delta;
+    }
+
+    function fillOrder(
+        PoolKey calldata key,
+        int24 tick,
+        bool zeroForOne,
+        int256 amountIn
+    ) internal {
+        // Setup the swapping parameters
+        IPoolManager.SwapParams memory swapParaps = IPoolManager.SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -amountIn,
+            // Set the price limit to be the least possible if swapping from Token 0 to Token 1
+            // or the maximum possible if swapping from Token 1 to Token 0
+            // i.e. infinite slippage allowed
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        BalanceDelta delta = _handleSwap(key, swapParaps);
+
+        // Update mapping to reflect that `amountIn` worth of tokens have been swapped from this order
+        takeProfitPositions[key.toId()][tick][zeroForOne] -= amountIn;
+
+        uint256 tokenId = getTokenId(key, tick, zeroForOne);
+
+        // Tokens we were owed by Uniswap are represented as a positive delta change
+        uint256 amountOfTokensReceivedFromSwap = zeroForOne
+            ? uint256(int256(delta.amount1()))
+            : uint256(int256(delta.amount0()));
+
+        // Update the amount of tokens claimable for this order
+        tokenIdClaimable[tokenId] += amountOfTokensReceivedFromSwap;
+    }
+
+    function _tryFulfillingOrders(
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params
+    ) internal returns (bool, int24) {
+        // Get the exact current tick and use it to calculate the currentTickLower
+        (, int24 currentTick, ) = poolManager.getSlot0(key.toId());
+        int24 currentTickLower = _getTickLower(currentTick, key.tickSpacing);
+        int24 lastTickLower = tickLowerLasts[key.toId()];
+
+        // We execute orders in the opposite direction
+        // i.e. if someone does a zeroForOne swap to increase price of Token 1, we execute
+        // all orders that are oneForZero
+        // and vice versa
+        bool swapZeroForOne = !params.zeroForOne;
+        int256 swapAmountIn;
+
+        // If tick has increased since last tick (i.e. zeroForOne swaps happened)
+        if (lastTickLower < currentTickLower) {
+            // Loop through all ticks between the lastTickLower and currentTickLower
+            // and execute all orders that are oneForZero
+            for (int24 tick = lastTickLower; tick < currentTickLower; ) {
+                swapAmountIn = takeProfitPositions[key.toId()][tick][
+                    swapZeroForOne
+                ];
+                if (swapAmountIn > 0) {
+                    fillOrder(key, tick, swapZeroForOne, swapAmountIn);
+
+                    // The fulfillment of the above order has changed the current tick
+                    // Refetch the current tick value, and return it
+                    // Also, return `true`, as we may have orders available to fulfill in the new tick range
+                    (, currentTick, , ) = poolManager.getSlot0(key.toId());
+                    currentTickLower = _getTickLower(
+                        currentTick,
+                        key.tickSpacing
+                    );
+                    return (true, currentTickLower);
+                }
+                tick += key.tickSpacing;
+            }
+        }
+        // Else if tick has decreased (i.e. oneForZero swaps happened)
+        else {
+            // Loop through all ticks between the lastTickLower and currentTickLower
+            // and execute all orders that are zeroForOne
+            for (int24 tick = lastTickLower; currentTickLower < tick; ) {
+                swapAmountIn = takeProfitPositions[key.toId()][tick][
+                    swapZeroForOne
+                ];
+                if (swapAmountIn > 0) {
+                    fillOrder(key, tick, swapZeroForOne, swapAmountIn);
+
+                    // The fulfillment of the above order has changed the current tick
+                    // Refetch the current tick value, and return it
+                    // Also, return `true`, as we may have orders available to fulfill in the new tick range
+                    (, currentTick, , ) = poolManager.getSlot0(key.toId());
+                    currentTickLower = _getTickLower(
+                        currentTick,
+                        key.tickSpacing
+                    );
+                    return (true, currentTickLower);
+                }
+                tick -= key.tickSpacing;
+            }
+        }
+
+        // If we did not return by now, there are no orders possibly left to fulfill within the range
+        // Return `false` and the currentTickLower value
+        return (false, currentTickLower);
+    }
+
+    function afterSwap(
+        address addr,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        BalanceDelta,
+        bytes calldata
+    ) external override onlyPoolManager returns (bytes4) {
+        // Every time we fulfill an order, we do a swap
+        // So it creates an `afterSwap` call back to ourselves
+        // This opens us up for re-entrancy attacks
+        // So if we detect we are calling ourselves, we return early and don't try to fulfill any orders
+        if (addr == address(this)) {
+            return TakeProfitsHook.afterSwap.selector;
+        }
+
+        bool attemptToFillMoreOrders = true;
+        int24 currentTickLower;
+
+        // While we have any possibility of having orders left to fulfill
+        while (attemptToFillMoreOrders) {
+            // Try fulfilling orders
+            (attemptToFillMoreOrders, currentTickLower) = _tryFulfillingOrders(
+                key,
+                params
+            );
+            // Update `tickLowerLasts` to have the value of `currentTickLower` after the last iteration
+            tickLowerLasts[key.toId()] = currentTickLower;
+        }
+
+        return TakeProfitsHook.afterSwap.selector;
+    }
+
+    function redeem(
+        uint256 tokenId,
+        uint256 amountIn,
+        address destination
+    ) external {
+        // Make sure there is something to claim
+        require(
+            tokenIdClaimable[tokenId] > 0,
+            "TakeProfitsHook: No tokens to redeem"
+        );
+
+        // Make sure user has enough ERC-1155 tokens to redeem the amount they're requesting
+        uint256 balance = balanceOf(msg.sender, tokenId);
+        require(
+            balance >= amountIn,
+            "TakeProfitsHook: Not enough ERC-1155 tokens to redeem requested amount"
+        );
+
+        TokenData memory data = tokenIdData[tokenId];
+        Currency tokenToSend = data.zeroForOne
+            ? data.poolKey.currency1
+            : data.poolKey.currency0;
+
+        // multiple people could have added tokens to the same order, so we need to calculate the amount to send
+        // total supply = total amount of tokens that were part of the order to be sold
+        // therefore, user's share = (amountIn / total supply)
+        // therefore, amount to send to user = (user's share * total claimable)
+
+        // amountToSend = amountIn * (total claimable / total supply)
+        // We use FixedPointMathLib.mulDivDown to avoid rounding errors
+        uint256 amountToSend = amountIn.mulDivDown(
+            tokenIdClaimable[tokenId],
+            tokenIdTotalSupply[tokenId]
+        );
+
+        tokenIdClaimable[tokenId] -= amountToSend;
+        tokenIdTotalSupply[tokenId] -= amountIn;
+        _burn(msg.sender, tokenId, amountIn);
+
+        tokenToSend.transfer(destination, amountToSend);
     }
 }
