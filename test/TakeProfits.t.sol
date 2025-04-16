@@ -81,14 +81,7 @@ contract TakeProfitsHookTest is Test, Deployers {
         _stubValidateHookAddress();
 
         // Initialize a pool with these two tokens
-        (key, ) = initPool(
-            tokenOne,
-            tokenTwo,
-            hook,
-            3000,
-            SQRT_PRICE_1_1,
-            ZERO_BYTES
-        );
+        (key, ) = initPool(tokenOne, tokenTwo, hook, 3000, SQRT_PRICE_1_1);
 
         // Add initial liquidity to the pool
 
@@ -98,7 +91,8 @@ contract TakeProfitsHookTest is Test, Deployers {
             IPoolManager.ModifyLiquidityParams({
                 tickLower: -60,
                 tickUpper: 60,
-                liquidityDelta: 10 ether
+                liquidityDelta: 10 ether,
+                salt: 0
             }),
             ZERO_BYTES
         );
@@ -108,7 +102,8 @@ contract TakeProfitsHookTest is Test, Deployers {
             IPoolManager.ModifyLiquidityParams({
                 tickLower: -60,
                 tickUpper: 60,
-                liquidityDelta: 10 ether
+                liquidityDelta: 10 ether,
+                salt: 0
             }),
             ZERO_BYTES
         );
@@ -118,7 +113,8 @@ contract TakeProfitsHookTest is Test, Deployers {
             IPoolManager.ModifyLiquidityParams({
                 tickLower: TickMath.minUsableTick(60),
                 tickUpper: TickMath.maxUsableTick(60),
-                liquidityDelta: 10 ether
+                liquidityDelta: 10 ether,
+                salt: 0
             }),
             ZERO_BYTES
         );
@@ -235,15 +231,11 @@ contract TakeProfitsHookTest is Test, Deployers {
         IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
             zeroForOne: !zeroForOne,
             amountSpecified: -1 ether,
-            sqrtPriceLimitX96: TickMath.MAX_SQRT_RATIO - 1
+            sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
         });
 
         PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
-            .TestSettings({
-                withdrawTokens: true,
-                settleUsingTransfer: true,
-                currencyAlreadySent: false
-            });
+            .TestSettings({takeClaims: true, settleUsingBurn: true});
 
         swapRouter.swap(key, params, testSettings, ZERO_BYTES);
 
@@ -282,15 +274,11 @@ contract TakeProfitsHookTest is Test, Deployers {
         IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
             zeroForOne: !zeroForOne,
             amountSpecified: -1 ether,
-            sqrtPriceLimitX96: TickMath.MIN_SQRT_RATIO + 1
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
         });
 
         PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
-            .TestSettings({
-                withdrawTokens: true,
-                settleUsingTransfer: true,
-                currencyAlreadySent: false
-            });
+            .TestSettings({takeClaims: true, settleUsingBurn: true});
 
         swapRouter.swap(key, params, testSettings, ZERO_BYTES);
 
@@ -318,11 +306,7 @@ contract TakeProfitsHookTest is Test, Deployers {
 
     function test_multiple_orderExecute_zeroForOne() public {
         PoolSwapTest.TestSettings memory testSettings = PoolSwapTest
-            .TestSettings({
-                withdrawTokens: true,
-                settleUsingTransfer: true,
-                currencyAlreadySent: false
-            });
+            .TestSettings({takeClaims: true, settleUsingBurn: true});
 
         // Setup two zeroForOne orders at ticks 0 and 60
         uint256 amount = 1 ether;
@@ -334,7 +318,7 @@ contract TakeProfitsHookTest is Test, Deployers {
         IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
             zeroForOne: false,
             amountSpecified: -0.5 ether,
-            sqrtPriceLimitX96: TickMath.MAX_SQRT_RATIO - 1
+            sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
         });
 
         swapRouter.swap(key, params, testSettings, ZERO_BYTES);

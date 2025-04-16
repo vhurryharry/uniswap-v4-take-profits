@@ -12,8 +12,10 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 
 using FixedPointMathLib for uint256;
+using StateLibrary for IPoolManager;
 
 contract TakeProfitsHook is BaseHook, ERC1155 {
     // Use the PoolIdLibrary for PoolKey to add the `.toId()` function on a PoolKey
@@ -95,16 +97,14 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
     }
 
     // Hooks
-    function afterInitialize(
+    function _afterInitialize(
         address,
         PoolKey calldata key,
         uint160,
-        int24 tick,
-        // Add bytes calldata after tick
-        bytes calldata
-    ) external override onlyPoolManager returns (bytes4) {
+        int24 tick
+    ) internal override onlyPoolManager returns (bytes4) {
         _setTickLowerLast(key.toId(), _getTickLower(tick, key.tickSpacing));
-        return TakeProfitsHook.afterInitialize.selector;
+        return BaseHook.afterInitialize.selector;
     }
 
     function getTokenId(
@@ -279,7 +279,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         IPoolManager.SwapParams calldata params
     ) internal returns (bool, int24) {
         // Get the exact current tick and use it to calculate the currentTickLower
-        (, int24 currentTick, ) = poolManager.getSlot0(key.toId());
+        (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
         int24 currentTickLower = _getTickLower(currentTick, key.tickSpacing);
         int24 lastTickLower = tickLowerLasts[key.toId()];
 
@@ -344,19 +344,19 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
         return (false, currentTickLower);
     }
 
-    function afterSwap(
+    function _afterSwap(
         address addr,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
         BalanceDelta,
         bytes calldata
-    ) external override onlyPoolManager returns (bytes4) {
+    ) internal override onlyPoolManager returns (bytes4, int128) {
         // Every time we fulfill an order, we do a swap
         // So it creates an `afterSwap` call back to ourselves
         // This opens us up for re-entrancy attacks
         // So if we detect we are calling ourselves, we return early and don't try to fulfill any orders
         if (addr == address(this)) {
-            return TakeProfitsHook.afterSwap.selector;
+            return (BaseHook.afterSwap.selector, 0);
         }
 
         bool attemptToFillMoreOrders = true;
@@ -373,7 +373,7 @@ contract TakeProfitsHook is BaseHook, ERC1155 {
             tickLowerLasts[key.toId()] = currentTickLower;
         }
 
-        return TakeProfitsHook.afterSwap.selector;
+        return (BaseHook.afterSwap.selector, 0);
     }
 
     function redeem(
